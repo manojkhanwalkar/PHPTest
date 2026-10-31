@@ -7,8 +7,17 @@ HARDENING="--read-only --cap-drop=ALL --security-opt=no-new-privileges"
 APP_HARDENING="$HARDENING \
   --tmpfs /var/run/apache2:mode=1777 --tmpfs /var/lock/apache2:mode=1777 --tmpfs /tmp:mode=1777"
 PROXY_HARDENING="$HARDENING --tmpfs /tmp:mode=1777"
-# Rootless Podman: map the host user to nginx's uid so it can read a 0600 key file.
-case "$ENGINE" in *podman) PROXY_HARDENING="$PROXY_HARDENING --userns=keep-id:uid=101,gid=101" ;; esac
+# Rootless Podman can map the host user to nginx's uid (101), so nginx can read a
+# 0600 key file. Docker and rootful Podman can't (keep-id is rootless-only).
+PROXY_MAPS_HOST_USER=false
+case "$ENGINE" in
+    *podman)
+        if [ "$("$ENGINE" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" = true ]; then
+            PROXY_MAPS_HOST_USER=true
+            PROXY_HARDENING="$PROXY_HARDENING --userns=keep-id:uid=101,gid=101"
+        fi
+        ;;
+esac
 
 build_images() {
     "$ENGINE" build -q -t phptest . >/dev/null
@@ -52,14 +61,15 @@ ensure_certs() {
     allow_proxy_key_read
 }
 
-# Podman maps the host user to nginx's uid (see PROXY_HARDENING), so the generated
-# key stays 0600. Other engines can't, so nginx (uid 101) needs the key to be
-# world-readable; certs/ itself stays 0700, so other host users still can't reach it.
+# With rootless Podman the generated key stays 0600 (see PROXY_MAPS_HOST_USER).
+# Otherwise nginx (uid 101) needs it world-readable; certs/ itself stays 0700, so
+# other host users still can't reach it.
 allow_proxy_key_read() {
-    case "$ENGINE" in
-        *podman) chmod 600 "$TLS_KEY" ;;
-        *) chmod 644 "$TLS_KEY" ;;
-    esac
+    if [ "$PROXY_MAPS_HOST_USER" = true ]; then
+        chmod 600 "$TLS_KEY"
+    else
+        chmod 644 "$TLS_KEY"
+    fi
 }
 
 # start_stack <prefix> [publish-spec]: nginx shares the Apache container's network

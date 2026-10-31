@@ -55,8 +55,8 @@ TLS_CERT=/path/fullchain.pem TLS_KEY=/path/privkey.pem BIND=0.0.0.0 ./run.sh
 ```
 
 The key is mounted read-only into nginx at run time and never built into an
-image. With Podman the key can stay `chmod 600`. With Docker the nginx user
-(uid 101) must be able to read it: the generated key is made readable inside the
+image. With rootless Podman the key can stay `chmod 600`. With Docker or rootful
+Podman the nginx user (uid 101) must be able to read it: the generated key is made readable inside the
 `0700` `certs/` directory automatically; for your own key use e.g.
 `sudo chown 101 privkey.pem`.
 
