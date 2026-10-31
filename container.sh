@@ -31,6 +31,7 @@ ensure_certs() {
     TLS_CERT=$PWD/certs/server.crt TLS_KEY=$PWD/certs/server.key TLS_CA=$PWD/certs/ca.crt
     if [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ] && [ -f "$TLS_CA" ] &&
         openssl x509 -checkend 86400 -noout -in "$TLS_CERT" >/dev/null; then
+        allow_proxy_key_read
         return
     fi
     echo "Generating a local CA and TLS certificate in ./certs (trust certs/ca.crt to avoid browser warnings)" >&2
@@ -48,6 +49,17 @@ ensure_certs() {
         rm -f ca.key server.csr server.ext
         chmod 644 ca.crt server.crt
     ) 2>/dev/null || { echo "certificate generation failed (is openssl installed?)" >&2; exit 1; }
+    allow_proxy_key_read
+}
+
+# Podman maps the host user to nginx's uid (see PROXY_HARDENING), so the generated
+# key stays 0600. Other engines can't, so nginx (uid 101) needs the key to be
+# world-readable; certs/ itself stays 0700, so other host users still can't reach it.
+allow_proxy_key_read() {
+    case "$ENGINE" in
+        *podman) chmod 600 "$TLS_KEY" ;;
+        *) chmod 644 "$TLS_KEY" ;;
+    esac
 }
 
 # start_stack <prefix> [publish-spec]: nginx shares the Apache container's network
