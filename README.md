@@ -33,6 +33,7 @@ Requires Podman or Docker (set `CONTAINER_ENGINE` to choose one) and `openssl`.
 ./run.sh                 # serve on https://127.0.0.1:8000 (this machine only); Ctrl+C stops it
 BIND=0.0.0.0 ./run.sh    # expose on all network interfaces
 ./test.sh                # run the tests (Apache directly, then via nginx over TLS)
+CONTAINER_ENGINE=docker ./test.sh   # force Docker instead of Podman
 
 curl --cacert certs/ca.crt https://localhost:8000/
 ```
@@ -54,8 +55,15 @@ TLS_CERT=/path/fullchain.pem TLS_KEY=/path/privkey.pem BIND=0.0.0.0 ./run.sh
 ```
 
 The key is mounted read-only into nginx at run time and never built into an
-image. With Podman the key can stay `chmod 600`. With Docker the nginx user
-(uid 101) must be able to read it, e.g. `sudo chown 101 privkey.pem`.
+image. With rootless Podman the key can stay `chmod 600`. With Docker or rootful
+Podman the nginx user (uid 101) must be able to read it: the generated key is made readable inside the
+`0700` `certs/` directory automatically; for your own key use e.g.
+`sudo chown 101 privkey.pem`.
+
+## CI
+
+`.github/workflows/test.yml` runs `./test.sh` on every push to `master` and on
+pull requests, once with Podman and once with Docker.
 
 ## Security hardening
 
