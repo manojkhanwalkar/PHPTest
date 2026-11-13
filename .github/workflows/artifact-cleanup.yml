@@ -1,0 +1,72 @@
+# Delete the artifacts of superseded runs. Whenever a listed workflow finishes a run, keep, for each
+# kind of artifact, branch and source repository, only the artifacts of the newest run, and delete
+# the older runs' copies, so artifact storage never fills up. Artifacts of runs still in progress
+# are never touched (a parallel run may still need them).
+#
+# Keep `workflows:` in sync with this repository's workflows that upload artifacts (exact names;
+# a name that doesn't match never fires). No schedule on purpose: GitHub disables scheduled
+# workflows after 60 days without activity, and each run re-checks the whole repository anyway.
+# Template: ~/.claude/skills/templates/artifact-cleanup.yml
+name: Artifact cleanup
+
+on:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+# Runs are serialized; a newer pending run replaces an older pending one, which is fine because
+# every run re-lists all artifacts.
+concurrency:
+  group: artifact-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Delete superseded artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete artifacts of all but the newest run per kind, branch and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/actions/artifacts?per_page=100" --paginate --jq '.artifacts[]' \
+            | jq -s -c '
+                # Docker build records get a random suffix per build; group them as one kind.
+                def kind: .name | sub("~[A-Za-z0-9]+\\.dockerbuild$"; ".dockerbuild");
+                map(select((.expired | not) and .workflow_run.id != null))
+                | group_by([kind, .workflow_run.head_repository_id, (.workflow_run.head_branch // "")])
+                | map((map(.workflow_run.id) | max) as $newest
+                      | map(select(.workflow_run.id != $newest)))
+                | flatten
+                | .[] | {id, name, run: .workflow_run.id, branch: (.workflow_run.head_branch // "-")}' \
+            > candidates.jsonl
+          # Only runs that have finished: an older run still in progress may need its artifacts.
+          declare -A run_done
+          for run in $(jq -r '.run' candidates.jsonl | sort -u); do
+            status=$(gh api "repos/$REPO/actions/runs/$run" --jq '.status' 2>/dev/null || echo gone)
+            run_done[$run]=$([ "$status" = "completed" ] || [ "$status" = "gone" ] && echo 1 || echo 0)
+          done
+          deleted=0 skipped=0 failed=0
+          while read -r line; do
+            id=$(jq -r '.id' <<<"$line"); run=$(jq -r '.run' <<<"$line")
+            label="$(jq -r '"\(.name) (\(.branch), run \(.run))"' <<<"$line")"
+            if [ "${run_done[$run]}" != 1 ]; then
+              skipped=$((skipped + 1)); continue
+            fi
+            if out=$(gh api -X DELETE "repos/$REPO/actions/artifacts/$id" 2>&1); then
+              echo "deleted $label"; deleted=$((deleted + 1))
+            elif grep -q "HTTP 404" <<<"$out"; then
+              echo "already gone: $label"
+            else
+              echo "::warning::could not delete artifact $id: $out"; failed=$((failed + 1))
+            fi
+          done < candidates.jsonl
+          echo "deleted $deleted, skipped $skipped (runs in progress), failed $failed"
+          test "$failed" -eq 0
